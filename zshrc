@@ -122,7 +122,8 @@ if [ -f '/Users/achalpandey/google-cloud-sdk/completion.zsh.inc' ]; then . '/Use
 # Uses fzf if installed; falls back to a numbered menu otherwise.
 wt() {
   local -a trees
-  trees=("${(@f)$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')}")
+  # sub() (not $2) so worktree paths containing spaces survive intact
+  trees=("${(@f)$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /,""); print}')}")
   trees=(${trees:#})  # drop empty elements
   if (( ${#trees} == 0 )); then
     echo "wt: not inside a git repo" >&2
@@ -134,17 +135,22 @@ wt() {
   else
     local PS3="worktree> "
     select dst in "${trees[@]}"; do break; done
-    [[ -n "$dst" ]] || return 0
   fi
-  cd "$dst"
+  [[ -n "$dst" && -d "$dst" ]] && cd "$dst"
 }
 
 # --- wts: jump to any worktree in any Sandbox repo ----------------------------
 wts() {
-  local sandbox="${SANDBOX_DIR:-$HOME/Sandbox}" repo
-  local -a trees
-  for repo in "$sandbox"/*/main(N/); do
-    trees+=("${(@f)$(git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')}")
+  local sandbox="${SANDBOX_DIR:-$HOME/Sandbox}" dir
+  # -U makes the array dedupe on assignment: querying any worktree returns the
+  # repo's full (absolute) list, so scanning every dir converges to one entry each.
+  local -aU trees
+  # Scan repos at depth 1 (flat layout) and depth 2 (the ~/Sandbox <repo>/<tree>
+  # layout); the rev-parse check discards anything that isn't a worktree, so we no
+  # longer depend on the primary worktree being named "main".
+  for dir in "$sandbox"/*(N/) "$sandbox"/*/*(N/); do
+    git -C "$dir" rev-parse --is-inside-work-tree &>/dev/null || continue
+    trees+=("${(@f)$(git -C "$dir" worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /,""); print}')}")
   done
   trees=(${trees:#})  # drop empty elements
   if (( ${#trees} == 0 )); then
@@ -157,35 +163,112 @@ wts() {
   else
     local PS3="worktree> "
     select dst in "${trees[@]}"; do break; done
-    [[ -n "$dst" ]] || return 0
   fi
-  cd "$dst"
+  [[ -n "$dst" && -d "$dst" ]] && cd "$dst"
 }
 
-# --- prompt marker: show ⌂ <worktree-dir> when inside a linked worktree -------
-git_worktree_marker() {
-  local gd gcd
-  gd=$(git rev-parse --git-dir 2>/dev/null) || return
-  gcd=$(git rev-parse --git-common-dir 2>/dev/null)
-  if [[ "$gd" != "$gcd" ]]; then
-    echo "%F{yellow}⌂ $(basename "$(git rev-parse --show-toplevel)")%f"
-  fi
-}
-setopt PROMPT_SUBST
-RPROMPT='$(git_worktree_marker)'"${RPROMPT:+ $RPROMPT}"
+# --- prompt: worktree-aware path + linked-worktree marker --------------------
+# Both pieces are derived from one `git rev-parse` per prompt (it accepts several
+# queries at once) cached via precmd, instead of the 3 separate rev-parse calls
+# the old per-segment functions spawned on every redraw. _wt_path / _wt_marker
+# are referenced from PROMPT/RPROMPT under PROMPT_SUBST and still carry %F codes,
+# which the prompt expands at render time (same as the previous command-subst).
+typeset -g _wt_path _wt_marker
 
-# --- prompt path: git-root-relative when inside a repo, basename otherwise ----
-git_prompt_path() {
-  local root
-  if root=$(git rev-parse --show-toplevel 2>/dev/null); then
-    print -r -- "%F{magenta}[${root:h:t}]%f %F{cyan}${PWD:t}%f"
+_wt_prompt_precmd() {
+  _wt_marker=''
+  local out
+  local -a parts
+  if out=$(git rev-parse --show-toplevel --git-dir --git-common-dir 2>/dev/null); then
+    parts=("${(@f)out}")              # 1: toplevel  2: git-dir  3: git-common-dir
+    local root=$parts[1]
+    local cur="${PWD:t}"
+    [[ "$PWD" == "$root" ]] && cur="."
+    _wt_path="%F{magenta}[${root:h:t}]%f %F{cyan}${cur}%f"
+    # git-dir differs from the shared common dir only inside a linked worktree
+    [[ "$parts[2]" != "$parts[3]" ]] && _wt_marker="%F{yellow}⌂ ${root:t}%f"
   else
-    print -rP -- "%F{cyan}%c%f"
+    _wt_path="%F{cyan}%c%f"
   fi
 }
-PROMPT="%(?:%{$fg_bold[green]%}%1{➜%} :%{$fg_bold[red]%}%1{➜%} ) \$(git_prompt_path)%{$reset_color%}"
-PROMPT+=' $(git_prompt_info)'
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _wt_prompt_precmd
+
+setopt PROMPT_SUBST
+PROMPT='%(?:%{$fg_bold[green]%}%1{➜%} :%{$fg_bold[red]%}%1{➜%} ) ${_wt_path}%{$reset_color%} $(git_prompt_info)'
+RPROMPT='${_wt_marker}'
 
 # --- convenience --------------------------------------------------------------
 alias sbx="$HOME/Sandbox/sandbox.sh"
 alias wtl="git worktree list"
+
+# AI Environment settings manager for Claude, Codex, and Cline
+set_ai_env() {
+  local env_name=$1
+  local url=""
+  local key=""
+  
+  case "$env_name" in
+    local)
+      url="http://127.0.0.1:8000"
+      key="vachi_sk_live_wvtseiuyov91tro6zazm"
+      ;;
+    production)
+      url="https://gateway.vachiai.com"
+      key="vachi_sk_live_wvtseiuyov91tro6zazm"
+      ;;
+    staging)
+      url="https://staging-gateway.vachiai.com"
+      key="vachi_sk_c675ad81f2d54aacb4160944f3515be6"
+      ;;
+    unset)
+      # Unset Claude
+      unset ANTHROPIC_BASE_URL
+      unset ANTHROPIC_API_KEY
+      unalias claude 2>/dev/null
+      
+      # Unset Codex
+      unset VACHI_API_KEY
+      if [ -f ~/.codex/config.toml ]; then
+        sed -i '' -e 's|^model_provider = "vachi"|model_provider = "openai"|' ~/.codex/config.toml
+      fi
+      
+      # Unset Cline
+      if [ -f ~/.cline/data/settings/providers.json ]; then
+        jq '.lastUsedProvider = "cline"' ~/.cline/data/settings/providers.json > /tmp/cline_providers.json && mv /tmp/cline_providers.json ~/.cline/data/settings/providers.json
+      fi
+      
+      echo "AI settings unset. Reverted to default configurations."
+      return 0
+      ;;
+    *)
+      echo "Usage: set_ai_env {local|production|staging|unset}"
+      return 1
+      ;;
+  esac
+  
+  # 1. Claude Configuration
+  export ANTHROPIC_BASE_URL="$url"
+  export ANTHROPIC_API_KEY="$key"
+  alias claude="claude --model claude-opus-4-7"
+  
+  # 2. Codex Configuration
+  export VACHI_API_KEY="$key"
+  if [ -f ~/.codex/config.toml ]; then
+    sed -i '' -e 's|^model = ".*"|model = "gpt-5.5"|' ~/.codex/config.toml
+    sed -i '' -e 's|^model_provider = ".*"|model_provider = "vachi"|' ~/.codex/config.toml
+    sed -i '' -e "s|^base_url = \".*\"|base_url = \"$url\"|" ~/.codex/config.toml
+  fi
+  
+  # 3. Cline Configuration
+  if [ -f ~/.cline/data/settings/providers.json ]; then
+    jq '.lastUsedProvider = "openai-compatible" | .providers["openai-compatible"].settings.baseUrl = "'"$url"'" | .providers["openai-compatible"].settings.apiKey = "'"$key"'" | .providers["openai-compatible"].settings.model = "vachi-google"' ~/.cline/data/settings/providers.json > /tmp/cline_providers.json && mv /tmp/cline_providers.json ~/.cline/data/settings/providers.json
+  fi
+  
+  echo "AI settings updated to $env_name:"
+  echo "  - Gateway URL: $url"
+  echo "  - API Key:     $key"
+  echo "  - Claude Code: Set to claude-opus-4-7"
+  echo "  - Codex:       Set to gpt-5.5"
+  echo "  - Cline:       Set to gemini-3.1-pro-preview"
+}
