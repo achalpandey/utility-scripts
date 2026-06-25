@@ -202,6 +202,7 @@ cmd_clean() {
     git -C "$main" fetch origin --prune --quiet
     base="$(default_branch "$main")"
 
+    local ahead
     while read -r wt; do
       [[ "$wt" == "$main" ]] && continue
       branch="$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)"
@@ -213,15 +214,23 @@ cmd_clean() {
         continue
       fi
 
+      # Commits unique to this branch vs origin/$base. 0 means the branch is
+      # still sitting at base — a fresh worktree with no work yet, NOT merged.
+      ahead="$(git -C "$wt" rev-list --count "origin/$base..HEAD" 2>/dev/null || echo 0)"
+
       # Mergeable? Prefer PR state from GitHub; fall back to ancestry check.
       state="$(cd "$wt" && gh pr view "$branch" --json state --jq .state 2>/dev/null || echo NONE)"
       reason=""
       if [[ "$state" == "MERGED" ]]; then
         reason="PR merged"
+      elif [[ "$state" == "NONE" && "$ahead" == "0" ]]; then
+        # No PR and no commits beyond base — brand-new branch, keep it.
+        echo "  keep (new branch, no commits yet): $(basename "$wt") [$branch]"
+        continue
       elif [[ "$state" == "NONE" ]] && git -C "$main" merge-base --is-ancestor "$branch" "origin/$base" 2>/dev/null; then
         reason="merged into origin/$base"
       else
-        echo "  keep (PR state: $state): $(basename "$wt") [$branch]"
+        echo "  keep (PR state: $state, $ahead commit(s) ahead of origin/$base): $(basename "$wt") [$branch]"
         continue
       fi
 

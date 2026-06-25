@@ -1,0 +1,118 @@
+#!/bin/bash
+#
+# Template for local environment keys.
+# Copy to setup_local_keys.sh (gitignored) and fill in real values:
+#     cp setup_local_keys.sh.example setup_local_keys.sh
+# Then source it:  source ./setup_local_keys.sh
+#
+# NEVER commit the real setup_local_keys.sh — it is gitignored on purpose.
+
+# --- Colors for Logging ---
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}🚀 Starting local environment setup...${NC}"
+
+
+# 0. Set Environment
+export ENVIRONMENT="local-debug"
+echo -e "  ${GREEN}Check:${NC} Environment set to ${YELLOW}$ENVIRONMENT${NC}"
+
+# 1. Set AWS Bedrock API Key
+#export AWS_API_KEY="<aws-bedrock-bearer-token>"
+#echo -e "  ${GREEN}Check:${NC} AWS API Key loaded "
+
+# 2. Set Gemini API Key
+export GEMINI_API_KEY="<gemini-api-key>"
+echo -e "  ${GREEN}Check:${NC} Gemini API Key loaded."
+
+# 3. Set OpenAI API Key
+export OPENAI_API_KEY="sk-proj-<your-openai-key>"
+echo -e "  ${GREEN}Check:${NC} OpenAI API Key loaded."
+
+# 4. Set Anthropic API Key
+# The local auth fallback (core/auth.py) auto-detects routing from the key
+# shape: values starting with `sk-ant-` go to api.anthropic.com (direct);
+# anything else is assumed to be an AWS Bedrock bearer token and routed
+# through Bedrock using AWS_REGION below. This local setup uses Bedrock,
+# so we point ANTHROPIC_API_KEY at the Bedrock bearer token from step 1.
+# Override with a `sk-ant-…` direct key here if you need direct routing.
+export ANTHROPIC_API_KEY="sk-ant-<your-anthropic-key-or-bedrock-bearer-token>"
+echo -e "  ${GREEN}Check:${NC} Anthropic API Key loaded (routes via Bedrock)."
+
+# 4a. AWS region for Bedrock-routed Anthropic. Only consulted when
+# ANTHROPIC_API_KEY is a Bedrock bearer token (per the auto-detect above);
+# ignored for `sk-ant-…` keys.
+export AWS_REGION="us-west-2"
+echo -e "  ${GREEN}Check:${NC} AWS region for Bedrock set to ${YELLOW}$AWS_REGION${NC}."
+
+
+# 5. Set Vachi API Key
+export VACHI_API_KEY="vachi_sk_<your-key>"
+echo -e "  ${GREEN}Check:${NC} Vachi API Key loaded."
+
+# 5a. Per-environment Vachi API keys — fill in manually.
+export VACHI_PROD_API_KEY="vachi_sk_live_<prod-key>"
+export VACHI_STAGING_API_KEY="vachi_sk_<staging-key>"
+export VACHI_LOCAL_API_KEY="vachi_sk_<local-key>"
+# ponytail: eval for indirect expansion — works under bash and zsh when sourced.
+for v in VACHI_PROD_API_KEY VACHI_STAGING_API_KEY VACHI_LOCAL_API_KEY; do
+    eval "val=\$$v"
+    if [ -z "$val" ]; then
+        echo -e "  ${YELLOW}Warn :${NC} $v not set — fill in manually in setup_local_keys.sh."
+    else
+        echo -e "  ${GREEN}Check:${NC} $v loaded."
+    fi
+done
+
+# 5b. Anthropic OAuth token for the exhaustive_io_validation OAuth-passthrough
+# combos (combo 8 / 15). The harness (runner/matrix.py) sends this as the
+# inbound `Authorization: Bearer …` that the gateway forwards upstream; if
+# unset, those combos fall back to a fake sentinel and only assert rejection
+# behavior. Fill in a real OAuth token to exercise a live passthrough.
+export VACHI_STAGING_OAUTH_TOKEN="sk-ant-oat01-<oauth-token>"
+if [ -z "$VACHI_STAGING_OAUTH_TOKEN" ]; then
+    echo -e "  ${YELLOW}Warn :${NC} VACHI_STAGING_OAUTH_TOKEN not set — OAuth-passthrough combos use the fake sentinel."
+else
+    echo -e "  ${GREEN}Check:${NC} VACHI_STAGING_OAUTH_TOKEN loaded."
+fi
+
+# 6. Internal Admin Key
+export INTERNAL_ADMIN_TOKEN="<internal-admin-token>"
+echo -e "  ${GREEN}Check:${NC} Internal Admin Key loaded."
+
+# 7. Vachi Billing Admin Token (gates POST /v1/billing/admin/* endpoints)
+export VACHI_ADMIN_TOKEN="<vachi-admin-token>"
+echo -e "  ${GREEN}Check:${NC} Vachi Admin token loaded."
+
+# 8. Stripe Secret Key (test mode)
+export STRIPE_SECRET_KEY=sk_test_<your-stripe-test-key>
+# Some code paths read STRIPE_API_KEY directly — mirror the test key there too.
+export STRIPE_API_KEY=$STRIPE_SECRET_KEY
+echo -e "  ${GREEN}Check:${NC} Stripe Secret key loaded."
+
+# 9. Stripe Product IDs (test mode). Live IDs are set in production deploy:
+#    Expected:       prod_UZHU8aTqUDpxOJ
+#    Actual:         prod_UZHTTL5q9Q1DVg
+#    Savings share:  prod_UZHSxuS4Qozd8B
+# Bootstrap test-mode equivalents with:
+#    python scripts/bootstrap_stripe_products.py
+# then paste the printed export statements here, replacing the empties below.
+export STRIPE_PRODUCT_EXPECTED_TOKEN_COST=""
+export STRIPE_PRODUCT_ACTUAL_TOKEN_COST=""
+export STRIPE_PRODUCT_CUSTOMER_SAVINGS_SHARE=""
+if [[ -z "$STRIPE_PRODUCT_EXPECTED_TOKEN_COST" ]]; then
+    echo -e "  ${YELLOW}Warn :${NC} STRIPE_PRODUCT_* not set — billing will fall back to free-form line items (no product attachment)."
+else
+    echo -e "  ${GREEN}Check:${NC} Stripe Product IDs loaded."
+fi
+
+# 10. DB URLS
+export PROD_DATABASE_URL="postgresql://postgres:<prod-db-password>@<prod-db-host>:5432/postgres"
+export STAGING_DATABASE_URL="postgresql://postgres:<staging-db-password>@<staging-db-host>:5432/postgres"
+echo -e "  ${GREEN}Check:${NC} DB URLS loaded."
+
+echo -e "${BLUE}✅ Local environment is ready to rock!${NC}"
+echo "--------------------------------------"

@@ -1,2 +1,5 @@
-# Local secrets — never commit
+.eval-secrets
+
+# Real local keys — contains live API keys, OAuth tokens, and prod/staging DB
+# passwords. Commit setup_local_keys.sh.example instead.
 setup_local_keys.sh
