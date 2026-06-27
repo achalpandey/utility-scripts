@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cache-lens",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/achalpandey/Sandbox/llm-gateway/tool-error/apps/token_distillation/cache_lens && exec ./run.sh --restart --port 8770"],
+      "port": 8770
+    }
+  ]
+}

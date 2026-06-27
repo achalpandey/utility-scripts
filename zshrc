@@ -167,26 +167,18 @@ wts() {
   [[ -n "$dst" && -d "$dst" ]] && cd "$dst"
 }
 
-# --- prompt: worktree-aware path + linked-worktree marker --------------------
-# Both pieces are derived from one `git rev-parse` per prompt (it accepts several
-# queries at once) cached via precmd, instead of the 3 separate rev-parse calls
-# the old per-segment functions spawned on every redraw. _wt_path / _wt_marker
-# are referenced from PROMPT/RPROMPT under PROMPT_SUBST and still carry %F codes,
-# which the prompt expands at render time (same as the previous command-subst).
-typeset -g _wt_path _wt_marker
+# --- prompt: parent-of-root + current dir ------------------------------------
+# _wt_path is built once per prompt in precmd from a single `git rev-parse`,
+# instead of spawning per-segment rev-parse calls on every redraw. It carries
+# %F color codes that PROMPT expands at render time under PROMPT_SUBST.
+typeset -g _wt_path
 
 _wt_prompt_precmd() {
-  _wt_marker=''
-  local out
-  local -a parts
-  if out=$(git rev-parse --show-toplevel --git-dir --git-common-dir 2>/dev/null); then
-    parts=("${(@f)out}")              # 1: toplevel  2: git-dir  3: git-common-dir
-    local root=$parts[1]
+  local root
+  if root=$(git rev-parse --show-toplevel 2>/dev/null); then
     local cur="${PWD:t}"
     [[ "$PWD" == "$root" ]] && cur="."
     _wt_path="%F{magenta}[${root:h:t}]%f %F{cyan}${cur}%f"
-    # git-dir differs from the shared common dir only inside a linked worktree
-    [[ "$parts[2]" != "$parts[3]" ]] && _wt_marker="%F{yellow}⌂ ${root:t}%f"
   else
     _wt_path="%F{cyan}%c%f"
   fi
@@ -195,12 +187,111 @@ autoload -Uz add-zsh-hook
 add-zsh-hook precmd _wt_prompt_precmd
 
 setopt PROMPT_SUBST
-PROMPT='%(?:%{$fg_bold[green]%}%1{➜%} :%{$fg_bold[red]%}%1{➜%} ) ${_wt_path}%{$reset_color%} $(git_prompt_info)'
-RPROMPT='${_wt_marker}'
+# Slim git segment: "⎇ branch" instead of oh-my-zsh's "git:(branch)".
+# DIRTY/CLEAN are overridden too — robbyrussell puts the closing ")" there.
+ZSH_THEME_GIT_PROMPT_PREFIX="%F{blue}⎇ %F{red}"
+ZSH_THEME_GIT_PROMPT_SUFFIX="%f"
+ZSH_THEME_GIT_PROMPT_DIRTY="%F{yellow} ✗%f"
+ZSH_THEME_GIT_PROMPT_CLEAN=""
+PROMPT='${_wt_path}%{$reset_color%} $(git_prompt_info) '
 
 # --- convenience --------------------------------------------------------------
 alias sbx="$HOME/Sandbox/sandbox.sh"
 alias wtl="git worktree list"
+
+# Local gateway: find the app dir (walk up from $PWD, else fall back to main
+# worktree), activate venv + load keys in this shell, then spawn the gateway
+# and billing services in detached tmux sessions.
+gateway() {
+  command -v tmux >/dev/null || { echo "tmux not installed"; return 1; }
+  local app_dir="" d="$PWD"
+  while [ "$d" != "/" ]; do
+    [ -d "$d/apps/token_distillation" ] && { app_dir="$d/apps/token_distillation"; break; }
+    [ "$(basename "$d")" = "token_distillation" ] && { app_dir="$d"; break; }
+    d=$(dirname "$d")
+  done
+  : "${app_dir:=$HOME/Sandbox/llm-gateway/main/apps/token_distillation}"
+  # Keys live outside the repo so secrets never get committed.
+  local keys="$HOME/Sandbox/occasional/utility-scripts/setup_local_keys.sh"
+  cd "$app_dir" || return
+  source venv/bin/activate
+  source "$keys"
+
+  # Each tmux session re-sources venv + keys so it stands alone; `exec zsh`
+  # keeps the pane open after the process exits so tracebacks stay visible.
+  local init="source venv/bin/activate && source $keys"
+  tmux has-session -t gateway 2>/dev/null && tmux kill-session -t gateway
+  tmux has-session -t billing 2>/dev/null && tmux kill-session -t billing
+  tmux new-session -d -s gateway -c "$app_dir" "$init && python main.py; exec zsh -i"
+  tmux new-session -d -s billing -c "$app_dir" "$init && python billing_service.py; exec zsh -i"
+  echo "gateway → :8000   attach: tmux attach -t gateway"
+  echo "billing → :8002   attach: tmux attach -t billing"
+}
+
+# Kill the gateway/billing tmux sessions, then sweep any stragglers on the
+# ports as a safety net.
+gateway-kill() {
+  for s in gateway billing; do
+    if tmux has-session -t "$s" 2>/dev/null; then
+      tmux kill-session -t "$s" && echo "killed tmux session: $s"
+    fi
+  done
+  local pids
+  pids=$(lsof -ti tcp:8000 -ti tcp:8002 2>/dev/null | sort -u)
+  if [ -n "$pids" ]; then
+    echo "$pids" | xargs kill -9 2>/dev/null
+    echo "killed stragglers on :8000/:8002: $(echo $pids | tr '\n' ' ')"
+  fi
+}
+
+# tmux shorthands: `tma <name>` attach-or-create, `tmk [name]` kill.
+tma() { tmux new-session -A -s "$1"; }
+tmk() {
+  if [ -n "$1" ]; then
+    tmux kill-session -t "$1"
+  else
+    tmux kill-session
+  fi
+}
+
+# Spawn one detached tmux session per host, each SSH'd in via `gcv`.
+# We probe prod-1 in the FOREGROUND first so any gcloud reauth prompt shows up
+# here (where you can answer it) and the refreshed token gets cached — only
+# then do we fan out to the detached sessions, which would otherwise hit reauth
+# prompts inside panes you can't see. Detached panes run `zsh -ic` so the gcv
+# shell function is defined; ssh drops to a shell on exit so the pane survives.
+gvm() {
+  command -v tmux >/dev/null || { echo "tmux not installed"; return 1; }
+
+  echo "Probing prod-1 (answer any reauth prompt now)…"
+  if ! gcv prod-1 ssh --command=true; then
+    echo "prod-1 unreachable — fix auth/connectivity before spawning the rest." >&2
+    return 1
+  fi
+  echo "prod-1 OK — spawning sessions."
+
+  local h cmd
+  for h in prod-1 prod-2 staging hachi; do
+    case "$h" in
+      hachi) cmd="ssh hachi-vm" ;;
+      *)     cmd="gcv $h ssh" ;;
+    esac
+    tmux has-session -t "$h" 2>/dev/null && tmux kill-session -t "$h"
+    tmux new-session -d -s "$h" "zsh -ic '$cmd; exec zsh -i'"
+  done
+
+  echo "Sessions: prod-1, prod-2, staging, hachi   (attach: tma prod-1 | tma prod-2 | tma staging | tma hachi)"
+}
+
+# GCP VM ssh aliases — `ssh prod-1` etc. resolves to `gcloud compute ssh <vm>`.
+ssh() {
+  case "$1" in
+    prod-1)   shift; command gcloud compute ssh llm-gateway-1       "$@" ;;
+    prod-2)   shift; command gcloud compute ssh llm-gateway-2b      "$@" ;;
+    staging)  shift; command gcloud compute ssh llm-gateway-staging "$@" ;;
+    *)        command ssh "$@" ;;
+  esac
+}
 
 # AI Environment settings manager for Claude, Codex, and Cline
 set_ai_env() {
@@ -271,4 +362,40 @@ set_ai_env() {
   echo "  - Claude Code: Set to claude-opus-4-7"
   echo "  - Codex:       Set to gpt-5.5"
   echo "  - Cline:       Set to gemini-3.1-pro-preview"
+}
+
+# --- GCP VM nickname helper ---
+# Usage: gcv <nickname> <gcloud compute subcommand> [args...]
+#   gcv prod-1 ssh
+#   gcv prod-2 scp ./file.txt :/tmp/
+#   gcv staging describe
+#   gcv prod-1 start | stop | reset
+# Maps nickname -> (project, zone, vm name) and injects --project/--zone.
+gcv() {
+  local nick="$1"; shift
+  local project zone vm
+  case "$nick" in
+    hachi)            project="hachi-playpen";          zone="us-central1-a"; vm="hachi-vm" ;;
+    prod-1)           project="original-bolt-450719-q4"; zone="us-central1-b"; vm="llm-gateway-1" ;;
+    prod-2)           project="original-bolt-450719-q4"; zone="us-central1-b"; vm="llm-gateway-2b" ;;
+    staging)          project="original-bolt-450719-q4"; zone="us-central1-a"; vm="llm-gateway-staging" ;;
+    -h|--help|"")
+      echo "gcv <prod-1|prod-2|staging|hachi> <gcloud-compute-subcommand> [args...]"
+      return 0 ;;
+    *) echo "gcv: unknown nickname '$nick'"; return 1 ;;
+  esac
+  local sub="$1"; shift
+  case "$sub" in
+    scp)
+      # rewrite ':path' tokens to '<vm>:path' so user doesn't repeat the VM name
+      local args=() a
+      for a in "$@"; do
+        case "$a" in :*) args+=("achal@${vm}${a}") ;; *) args+=("$a") ;; esac
+      done
+      gcloud compute scp --project="$project" --zone="$zone" "${args[@]}" ;;
+    ssh)
+      gcloud compute ssh --project="$project" --zone="$zone" "achal@$vm" "$@" ;;
+    *)
+      gcloud compute "$sub" --project="$project" --zone="$zone" "$vm" "$@" ;;
+  esac
 }
